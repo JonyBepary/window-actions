@@ -120,6 +120,7 @@ export default class Extension {
     this._signals = [];
     this._sources = [];
     this._announcedWindows = new Set();
+    this._lastCloseTime = new Map();
     this._windowLifecycleSignals = new Map();
     this._windowMetadata = new Map();
     this._watchedWindows = new Map();
@@ -133,6 +134,7 @@ export default class Extension {
     this._disconnectAllSources();
     this._disconnectAllSignals();
     this._announcedWindows.clear();
+    this._lastCloseTime.clear();
     this._windowLifecycleSignals.clear();
     this._windowMetadata.clear();
     this._watchedWindows.clear();
@@ -230,6 +232,34 @@ export default class Extension {
     );
   }
 
+  _validateInt(value, name) {
+    if (!Number.isInteger(value)) {
+      throw new Error(`Invalid ${name}: must be an integer`);
+    }
+  }
+
+  _validatePositiveInt(value, name) {
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error(`Invalid ${name}: must be a positive integer`);
+    }
+  }
+
+  _validateWorkspaceIndex(workspaceIndex) {
+    this._validateInt(workspaceIndex, 'workspaceIndex');
+    const workspaceCount = global.workspace_manager.get_n_workspaces();
+    if (workspaceIndex < 0 || workspaceIndex >= workspaceCount) {
+      throw new Error(`Invalid workspaceIndex: must be between 0 and ${workspaceCount - 1}`);
+    }
+  }
+
+  _validateMonitorIndex(monitorIndex) {
+    this._validateInt(monitorIndex, 'monitorIndex');
+    const monitorCount = global.display.get_n_monitors();
+    if (monitorIndex < 0 || monitorIndex >= monitorCount) {
+      throw new Error(`Invalid monitorIndex: must be between 0 and ${monitorCount - 1}`);
+    }
+  }
+
   _isDesktopIconsWindow(win) {
     const wmClass = this._getWindowClass(win);
     const title = this._safeString(win?.get_title?.());
@@ -290,10 +320,14 @@ export default class Extension {
         }
       }
 
-      this._emitSignal('WindowFocusChanged', '(us)', [
-        win.get_id(),
-        JSON.stringify(this._serializeFocusedWindow(win)),
-      ]);
+      try {
+        this._emitSignal('WindowFocusChanged', '(us)', [
+          win.get_id(),
+          JSON.stringify(this._serializeFocusedWindow(win)),
+        ]);
+      } catch (error) {
+        logError(error);
+      }
     });
 
     this._connectSignal(global.display, 'window-created', (_display, win) => {
@@ -406,6 +440,10 @@ export default class Extension {
   _serializeWindow(win) {
     const workspaceManager = global.workspace_manager;
     const frame = win.get_frame_rect();
+    if (!frame) {
+      throw new Error('Frame unavailable');
+    }
+
     const workspace = win.get_workspace();
 
     return {
@@ -431,6 +469,9 @@ export default class Extension {
     const workspaceManager = global.workspace_manager;
     const currentMonitor = global.display.get_current_monitor();
     const frame = win.get_frame_rect();
+    if (!frame) {
+      throw new Error('Frame unavailable');
+    }
 
     return {
       wm_class: win.get_wm_class?.(),
@@ -442,7 +483,6 @@ export default class Extension {
       x: frame.x,
       y: frame.y,
       maximized: win.get_maximized?.(),
-      display: win.get_display?.(),
       frame_type: win.get_frame_type?.(),
       window_type: win.get_window_type?.(),
       layer: win.get_layer?.(),
@@ -508,9 +548,10 @@ export default class Extension {
   }
 
   ListOnWorkspace(workspaceIndex) {
+    this._validateWorkspaceIndex(workspaceIndex);
     return JSON.stringify(this._listWindowActors(win => {
       const workspace = win.get_workspace();
-      return workspace ? workspace.index() === workspaceIndex : workspaceIndex === -1;
+      return workspace ? workspace.index() === workspaceIndex : false;
     }).map(actor => this._serializeWindow(actor.meta_window)));
   }
 
@@ -529,6 +570,7 @@ export default class Extension {
   }
 
   GetMonitorGeometry(monitorIndex) {
+    this._validateMonitorIndex(monitorIndex);
     return JSON.stringify(this._serializeMonitor(monitorIndex));
   }
 
@@ -543,6 +585,10 @@ export default class Extension {
   GetFrameRect(winid) {
     const actor = this._requireWindowActor(winid);
     const frame = actor.meta_window.get_frame_rect();
+    if (!frame) {
+      throw new Error('Frame unavailable');
+    }
+
     const result = {
       x: frame.x,
       y: frame.y,
@@ -554,16 +600,23 @@ export default class Extension {
 
   GetTitle(winid) {
     const actor = this._requireWindowActor(winid);
-    return actor.meta_window.get_title();
+    return JSON.stringify(actor.meta_window.get_title());
   }
 
   MoveToWorkspace(winid, workspaceNum) {
+    this._validateWorkspaceIndex(workspaceNum);
     const actor = this._requireWindowActor(winid);
+    log(`[window-actions] MoveToWorkspace requested for winid=${winid} workspace=${workspaceNum}`);
     actor.meta_window.change_workspace_by_index(workspaceNum, false);
   }
 
   MoveResize(winid, x, y, width, height) {
+    this._validateInt(x, 'x');
+    this._validateInt(y, 'y');
+    this._validatePositiveInt(width, 'width');
+    this._validatePositiveInt(height, 'height');
     const actor = this._requireWindowActor(winid);
+    log(`[window-actions] MoveResize requested for winid=${winid} x=${x} y=${y} width=${width} height=${height}`);
 
     if (actor.meta_window.maximized_horizontally || actor.meta_window.maximized_vertically) {
       actor.meta_window.unmaximize(3);
@@ -573,6 +626,8 @@ export default class Extension {
   }
 
   Resize(winid, width, height) {
+    this._validatePositiveInt(width, 'width');
+    this._validatePositiveInt(height, 'height');
     const actor = this._requireWindowActor(winid);
     if (actor.meta_window.maximized_horizontally || actor.meta_window.maximized_vertically) {
       actor.meta_window.unmaximize(3);
@@ -581,7 +636,10 @@ export default class Extension {
   }
 
   Move(winid, x, y) {
+    this._validateInt(x, 'x');
+    this._validateInt(y, 'y');
     const actor = this._requireWindowActor(winid);
+    log(`[window-actions] Move requested for winid=${winid} x=${x} y=${y}`);
     if (actor.meta_window.maximized_horizontally || actor.meta_window.maximized_vertically) {
       actor.meta_window.unmaximize(3);
     }
@@ -620,7 +678,15 @@ export default class Extension {
   }
 
   Close(winid) {
+    const now = GLib.get_monotonic_time();
+    const lastClose = this._lastCloseTime.get(winid) ?? 0;
+    if (now - lastClose < 100000) {
+      throw new Error('Rate limited');
+    }
+
     const actor = this._requireWindowActor(winid);
+    this._lastCloseTime.set(winid, now);
+    log(`[window-actions] Close requested for winid=${winid} (${this._getWindowClass(actor.meta_window)})`);
     actor.meta_window.delete(global.get_current_time());
   }
 }
