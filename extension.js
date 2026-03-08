@@ -576,8 +576,13 @@ export default class Extension {
 
   GetFrameBounds(winid) {
     const actor = this._requireWindowActor(winid);
+    const frameBounds = actor.meta_window.get_frame_bounds?.() ?? actor.meta_window.get_frame_rect?.();
+    if (!frameBounds) {
+      throw new Error('Frame unavailable');
+    }
+
     const result = {
-      frame_bounds: actor.meta_window.get_frame_bounds(),
+      frame_bounds: frameBounds,
     };
     return JSON.stringify(result);
   }
