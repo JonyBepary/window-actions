@@ -14,9 +14,10 @@ The API is designed around three use cases:
 
 The current implementation includes:
 
-- Milestone A: reactive lifecycle signals and focused grounding methods
-- Milestone B: server-side filtered enumeration methods
-- security hardening for parameter validation, rate limiting, and clearer trust-model documentation
+- lifecycle and focus signals for reactive window awareness
+- focused-window and monitor queries for OpenALO grounding
+- filtered discovery methods for workspace-scoped and PID-scoped enumeration
+- input validation, audit logging, and per-window close rate limiting for the exposed control surface
 
 ## DBus Coordinates
 
@@ -51,6 +52,10 @@ Recommended deployment assumptions:
 
 Most methods return JSON strings instead of typed DBus structs. This preserves compatibility with the historical extension behavior and simplifies integration with existing consumers.
 
+### Release Status
+
+The lifecycle signals, focused-window helpers, workspace filters, and PID filters are shipped capabilities of the current extension. They are part of the supported DBus surface, not planning placeholders.
+
 ### Lifecycle Model
 
 The extension does not emit a raw `window-created` event for every transient Mutter surface.
@@ -64,6 +69,22 @@ Instead:
 ### Focus Filtering
 
 `WindowFocusChanged` intentionally ignores Desktop Icons NG focus surfaces, which otherwise generate noisy focus churn with `wm_class: gjs` and titles like `Desktop Icons 1`.
+
+### Development and Reloading
+
+For routine development, re-copy `extension.js` into the local extension directory and toggle the extension with `gnome-extensions disable` and `gnome-extensions enable`.
+
+If GNOME Shell continues to serve stale DBus methods or older interface metadata after reload, log out and back in. On Wayland, that is the reliable full restart path.
+
+For GNOME 49 and later, the recommended iterative development workflow is a nested shell:
+
+```sh
+dbus-run-session gnome-shell --devkit --wayland
+```
+
+Reference:
+
+- [GJS Guide: Debugging and Reloading Extensions](https://gjs.guide/extensions/development/debugging.html#reloading-extensions)
 
 ## Signals
 
@@ -211,6 +232,15 @@ Behavior:
 - performs filtering inside the extension before returning the payload
 - throws an error for out-of-range workspace indices
 
+Example:
+
+```sh
+gdbus call --session \
+  --dest org.gnome.Shell \
+  --object-path /org/gnome/Shell/Extensions/Windows \
+  --method org.gnome.Shell.Extensions.Windows.ListOnWorkspace 0
+```
+
 ### `GetWindowsByPID(pid)`
 Returns only windows associated with a specific process ID.
 
@@ -228,6 +258,15 @@ Typical use:
 
 - correlate launched processes with visible windows
 - narrow a multi-window application down to one process origin
+
+Example:
+
+```sh
+gdbus call --session \
+  --dest org.gnome.Shell \
+  --object-path /org/gnome/Shell/Extensions/Windows \
+  --method org.gnome.Shell.Extensions.Windows.GetWindowsByPID 240345
+```
 
 ### `GetFocusedWindow()`
 Returns the currently focused window as JSON.
@@ -260,6 +299,15 @@ Returned shape:
 }
 ```
 
+Example:
+
+```sh
+gdbus call --session \
+  --dest org.gnome.Shell \
+  --object-path /org/gnome/Shell/Extensions/Windows \
+  --method org.gnome.Shell.Extensions.Windows.GetFocusedWindow
+```
+
 ### `GetMonitorGeometry(monitor_index)`
 Returns monitor geometry and scale metadata as JSON.
 
@@ -290,6 +338,15 @@ Typical use:
 - apply HiDPI-aware coordinate correction
 - determine per-monitor offsets in multi-monitor layouts
 
+Example:
+
+```sh
+gdbus call --session \
+  --dest org.gnome.Shell \
+  --object-path /org/gnome/Shell/Extensions/Windows \
+  --method org.gnome.Shell.Extensions.Windows.GetMonitorGeometry 0
+```
+
 ### `Details(winid)`
 Returns expanded metadata for a single window.
 
@@ -310,6 +367,15 @@ Notes:
 
 - the legacy `display` field was intentionally removed because it serialized an opaque `Meta.Display` object into useless output
 
+Example:
+
+```sh
+gdbus call --session \
+  --dest org.gnome.Shell \
+  --object-path /org/gnome/Shell/Extensions/Windows \
+  --method org.gnome.Shell.Extensions.Windows.Details 2436270931
+```
+
 ### `GetTitle(winid)`
 Returns a JSON-encoded title string.
 
@@ -323,6 +389,15 @@ Important behavior:
 - this method now returns `JSON.stringify(title)` for consistency with the rest of the API
 - consumers expecting a raw string must decode the JSON string first
 - titles may contain arbitrary Unicode, newlines, and special characters sourced from the owning application
+
+Example:
+
+```sh
+gdbus call --session \
+  --dest org.gnome.Shell \
+  --object-path /org/gnome/Shell/Extensions/Windows \
+  --method org.gnome.Shell.Extensions.Windows.GetTitle 2436270931
+```
 
 ### `GetFrameRect(winid)`
 Returns the frame rectangle for a window as JSON.
@@ -364,6 +439,15 @@ Parameter rules:
 
 - `workspace_num` must be an integer in the valid workspace range
 
+Example:
+
+```sh
+gdbus call --session \
+  --dest org.gnome.Shell \
+  --object-path /org/gnome/Shell/Extensions/Windows \
+  --method org.gnome.Shell.Extensions.Windows.MoveToWorkspace 2436270931 1
+```
+
 ### `MoveResize(winid, x, y, width, height)`
 Moves and resizes a window in a single operation.
 
@@ -375,6 +459,15 @@ Parameter rules:
 Audit behavior:
 
 - requests are logged to GNOME Shell logs for forensic visibility
+
+Example:
+
+```sh
+gdbus call --session \
+  --dest org.gnome.Shell \
+  --object-path /org/gnome/Shell/Extensions/Windows \
+  --method org.gnome.Shell.Extensions.Windows.MoveResize 2436270931 1500 120 1200 800
+```
 
 ### `Resize(winid, width, height)`
 Resizes a window.
@@ -459,6 +552,26 @@ screen_x = (atspi_x + focused['x']) * scale
 screen_y = (atspi_y + focused['y']) * scale
 ```
 
+## Example Workflows
+
+### Track the Current Application
+
+1. Subscribe to `WindowFocusChanged`.
+2. Read `GetFocusedWindow()` when a full refresh is needed.
+3. Optionally call `Details(winid)` for richer capability metadata.
+
+### Correlate a Launched Process to a Window
+
+1. Launch the application process.
+2. Call `GetWindowsByPID(pid)` until a window appears.
+3. Use the returned `id` for later `Activate()`, `Move()`, or `Close()` calls.
+
+### Scope Automation to the Visible Workspace
+
+1. Call `ListOnWorkspace(current_workspace_index)`.
+2. Filter by `wm_class` or `title` client-side.
+3. Operate only on returned window IDs.
+
 ## Validation Commands
 
 ### Introspection
@@ -512,6 +625,22 @@ gdbus call --session \
   --object-path /org/gnome/Shell/Extensions/Windows \
   --method org.gnome.Shell.Extensions.Windows.GetWindowsByPID 973721
 ```
+
+### Security Verification Script
+
+```sh
+cd /home/jony/alo-agent/window-actions
+bash tests/test_security_hardening.sh
+```
+
+The script performs live DBus verification for:
+
+- query payload contracts
+- invalid-parameter rejection
+- invalid window ID handling
+- focused-window invariants
+- `Close()` rate limiting
+- lifecycle signal behavior where a disposable test window becomes focus-relevant
 
 ### Title Query
 

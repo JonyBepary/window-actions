@@ -1,36 +1,79 @@
 # Window Actions for OpenALO
 
-`window-actions` is a GNOME Shell extension that exposes window metadata and window control APIs over DBus for OpenALO.
+`window-actions` is a GNOME Shell extension that exposes a DBus API for window discovery, focused-window grounding, lifecycle signals, and controlled window manipulation.
 
-It supports:
+The extension is intended for trusted local automation in OpenALO. It runs inside `gnome-shell` and publishes its API on the GNOME session bus.
 
-- listing windows and detailed window metadata
-- focused-window and monitor-geometry queries for grounding
-- workspace and PID filtered window queries
-- focus, creation, close, and workspace-change signals
-- moving, resizing, activating, maximizing, minimizing, and closing windows
+## What It Provides
+
+### Event Stream
+
+- `WindowFocusChanged`
+- `WindowCreated`
+- `WindowClosed`
+- `WorkspaceChanged`
+
+### Query Methods
+
+- `List()`
+- `ListOnWorkspace(workspaceIndex)`
+- `GetWindowsByPID(pid)`
+- `GetFocusedWindow()`
+- `GetMonitorGeometry(monitorIndex)`
+- `Details(winid)`
+- `GetTitle(winid)`
+- `GetFrameRect(winid)`
+- `GetFrameBounds(winid)`
+
+### Control Methods
+
+- `MoveToWorkspace(winid, workspaceNum)`
+- `MoveResize(winid, x, y, width, height)`
+- `Resize(winid, width, height)`
+- `Move(winid, x, y)`
+- `Maximize(winid)`
+- `Minimize(winid)`
+- `Unmaximize(winid)`
+- `Unminimize(winid)`
+- `Activate(winid)`
+- `Close(winid)`
 
 ## Extension Identity
 
 - Name: `Window Actions for OpenALO`
 - UUID: `window-actions@openalo.local`
+- DBus destination: `org.gnome.Shell`
 - DBus object path: `/org/gnome/Shell/Extensions/Windows`
 - DBus interface: `org.gnome.Shell.Extensions.Windows`
 
-## Local Installation
+## Security Model
 
-Install the extension locally from this repo:
+This extension has no caller authentication at the DBus layer.
+
+Any process running in the same user session can:
+
+- enumerate windows
+- observe window lifecycle and focus signals
+- read window titles, PIDs, and geometry
+- invoke destructive methods such as `Close()` and `MoveResize()`
+
+That is an intentional tradeoff for trusted local automation. Do not treat this extension as a secure multi-tenant control surface.
+
+For the full security policy, see [SECURITY.md](/home/jony/alo-agent/window-actions/SECURITY.md).
+
+## Installation
+
+Install the extension locally from this repository:
 
 ```sh
 mkdir -p ~/.local/share/gnome-shell/extensions/window-actions@openalo.local
 cp /home/jony/alo-agent/window-actions/extension.js ~/.local/share/gnome-shell/extensions/window-actions@openalo.local/
 cp /home/jony/alo-agent/window-actions/metadata.json ~/.local/share/gnome-shell/extensions/window-actions@openalo.local/
-gnome-extensions disable window-calls@domandoman.xyz || true
 gnome-extensions disable window-actions@openalo.local || true
 gnome-extensions enable window-actions@openalo.local
 ```
 
-Verify:
+Verify that GNOME Shell sees the extension:
 
 ```sh
 gnome-extensions info window-actions@openalo.local
@@ -39,44 +82,71 @@ gdbus introspect --session \
   --object-path /org/gnome/Shell/Extensions/Windows
 ```
 
-If GNOME does not discover the extension immediately on Wayland, log out and back in once.
+## Development Workflow
 
-## Milestone A
+### Reloading During Development
 
-Milestone A is implemented in the current extension.
+For normal extension edits:
 
-It adds:
+```sh
+cp /home/jony/alo-agent/window-actions/extension.js ~/.local/share/gnome-shell/extensions/window-actions@openalo.local/
+gnome-extensions disable window-actions@openalo.local
+gnome-extensions enable window-actions@openalo.local
+```
+
+If GNOME Shell continues to serve stale DBus methods or an older interface after reload, log out and back in. On Wayland, that is the reliable full shell restart.
+
+### Preferred GNOME 49 Development Loop
+
+For repeated development and debugging on GNOME 49 or later, use a nested shell as recommended by the GJS extension debugging guide:
+
+```sh
+dbus-run-session gnome-shell --devkit --wayland
+```
+
+For additional shell diagnostics:
+
+```sh
+export G_MESSAGES_DEBUG=all
+export SHELL_DEBUG=all
+dbus-run-session gnome-shell --devkit --wayland
+```
+
+Reference:
+
+- [GJS Guide: Debugging and Reloading Extensions](https://gjs.guide/extensions/development/debugging.html#reloading-extensions)
+
+## Implemented Capability Sets
+
+### Lifecycle and Focus Tracking
+
+The extension now provides:
 
 - lifecycle-safe signal registration and cleanup
-- `WindowFocusChanged`
-- `WindowCreated`
-- `WindowClosed`
-- `WorkspaceChanged`
-- `GetFocusedWindow()`
-- `GetMonitorGeometry(monitor_index)`
+- focused-window grounding with `GetFocusedWindow()`
+- monitor geometry lookup with `GetMonitorGeometry()`
+- filtered focus notifications that ignore Desktop Icons NG noise
+- focus-gated `WindowCreated` behavior to suppress transient popup surfaces
 
-### Signals
+### Filtered Discovery Queries
 
-Monitor signals with:
+The extension also provides:
+
+- workspace-scoped enumeration with `ListOnWorkspace()`
+- process-scoped enumeration with `GetWindowsByPID()`
+- hardened parameter validation for workspace and monitor indices
+
+These are shipped features of the current extension.
+
+## Runtime Verification
+
+### Signal Monitoring
 
 ```sh
 gdbus monitor --session \
   --dest org.gnome.Shell \
   --object-path /org/gnome/Shell/Extensions/Windows
 ```
-
-Exported signals:
-
-- `WindowFocusChanged(winid, details_json)`
-- `WindowCreated(winid, wm_class, pid)`
-- `WindowClosed(winid, wm_class)`
-- `WorkspaceChanged(workspace_index)`
-
-Notes:
-
-- `WindowCreated` is intentionally focus-gated so transient popup surfaces do not create noise.
-- `WindowClosed` is emitted for windows that were previously announced or have usable metadata.
-- `WindowFocusChanged` intentionally ignores Desktop Icons NG focus surfaces (`wm_class: gjs`, title `Desktop Icons ...`).
 
 ### Focused Window Query
 
@@ -87,78 +157,7 @@ gdbus call --session \
   --method org.gnome.Shell.Extensions.Windows.GetFocusedWindow
 ```
 
-Example result:
-
-```json
-{
-  "id": 3655718775,
-  "title": "codex",
-  "wm_class": "com.github.amezin.ddterm",
-  "wm_class_instance": "com.github.amezin.ddterm",
-  "pid": 913271,
-  "x": 1432,
-  "y": 32,
-  "width": 1854,
-  "height": 724,
-  "monitor": 0,
-  "workspace": 0,
-  "focus": true
-}
-```
-
-### Monitor Geometry Query
-
-```sh
-gdbus call --session \
-  --dest org.gnome.Shell \
-  --object-path /org/gnome/Shell/Extensions/Windows \
-  --method org.gnome.Shell.Extensions.Windows.GetMonitorGeometry 0
-```
-
-Example result:
-
-```json
-{
-  "x": 1366,
-  "y": 0,
-  "width": 1920,
-  "height": 1080,
-  "scale_factor": 1,
-  "is_primary": true
-}
-```
-
-### OpenALO Coordinate Correction
-
-Use the focused window frame and monitor scale together:
-
-```python
-focused = ext.GetFocusedWindow()
-monitor = ext.GetMonitorGeometry(focused['monitor'])
-scale = monitor['scale_factor']
-screen_x = (atspi_x + focused['x']) * scale
-screen_y = (atspi_y + focused['y']) * scale
-```
-
-## Milestone B
-
-Milestone B is also implemented.
-
-It adds server-side filtering methods:
-
-- `ListOnWorkspace(workspace_index)`
-- `GetWindowsByPID(pid)`
-
-### List All Windows
-
-```sh
-gdbus call --session \
-  --dest org.gnome.Shell \
-  --object-path /org/gnome/Shell/Extensions/Windows \
-  --method org.gnome.Shell.Extensions.Windows.List
-```
-
-### List Windows on a Workspace
+### Workspace Filter
 
 ```sh
 gdbus call --session \
@@ -167,74 +166,111 @@ gdbus call --session \
   --method org.gnome.Shell.Extensions.Windows.ListOnWorkspace 0
 ```
 
-### List Windows by PID
+### Security Verification Script
+
+The repository includes a live verification script for the hardened DBus surface:
+
+```sh
+cd /home/jony/alo-agent/window-actions
+bash tests/test_security_hardening.sh
+```
+
+The script checks:
+
+- JSON return contracts
+- invalid-parameter rejection
+- invalid window ID handling
+- focused-window invariants
+- disposable-window close and rate-limit behavior
+- lifecycle signal behavior where focus conditions allow it
+
+## Usage Examples
+
+### Example: Read the Focused Window
 
 ```sh
 gdbus call --session \
   --dest org.gnome.Shell \
   --object-path /org/gnome/Shell/Extensions/Windows \
-  --method org.gnome.Shell.Extensions.Windows.GetWindowsByPID 913271
+  --method org.gnome.Shell.Extensions.Windows.GetFocusedWindow
 ```
 
-These methods return the same JSON window objects as `List()`, but filtered server-side.
+Typical response:
 
-## Existing Window Details and Control Methods
+```text
+('{"id":2436270931,"title":"~/alo-agent/window-actions","wm_class":"com.github.amezin.ddterm","wm_class_instance":"com.github.amezin.ddterm","pid":240345,"x":1432,"y":32,"width":1854,"height":992,"monitor":0,"workspace":0,"focus":true}',)
+```
 
-### Detailed Window Information
+### Example: Find All Windows for a Process
+
+If you already know a PID, query only the windows that belong to it:
 
 ```sh
 gdbus call --session \
   --dest org.gnome.Shell \
   --object-path /org/gnome/Shell/Extensions/Windows \
-  --method org.gnome.Shell.Extensions.Windows.Details 3655718775
+  --method org.gnome.Shell.Extensions.Windows.GetWindowsByPID 240345
 ```
 
-### Frame Rectangle
+Typical response:
+
+```text
+('[{"wm_class":"com.github.amezin.ddterm","wm_class_instance":"com.github.amezin.ddterm","title":"~/alo-agent/window-actions","pid":240345,"id":2436270931,"frame_type":0,"window_type":0,"width":1854,"height":992,"x":1432,"y":32,"focus":true,"in_current_workspace":true,"workspace":0,"monitor":0}]',)
+```
+
+### Example: Monitor Live Window Events
+
+```sh
+gdbus monitor --session \
+  --dest org.gnome.Shell \
+  --object-path /org/gnome/Shell/Extensions/Windows
+```
+
+Typical output while switching windows:
+
+```text
+/org/gnome/Shell/Extensions/Windows: org.gnome.Shell.Extensions.Windows.WindowFocusChanged (uint32 2436270931, '{"id":2436270931,"title":"~/alo-agent/window-actions","wm_class":"com.github.amezin.ddterm","wm_class_instance":"com.github.amezin.ddterm","pid":240345,"x":1432,"y":32,"width":1854,"height":992,"monitor":0,"workspace":0,"focus":true}')
+```
+
+### Example: End-to-End OpenALO Grounding Flow
+
+1. Read the focused window.
+2. Read the monitor geometry for that window.
+3. Convert relative accessibility coordinates into screen coordinates.
+
+```python
+focused = ext.GetFocusedWindow()
+monitor = ext.GetMonitorGeometry(focused["monitor"])
+scale = monitor["scale_factor"]
+screen_x = (atspi_x + focused["x"]) * scale
+screen_y = (atspi_y + focused["y"]) * scale
+```
+
+### Example: Query a Workspace Only
 
 ```sh
 gdbus call --session \
   --dest org.gnome.Shell \
   --object-path /org/gnome/Shell/Extensions/Windows \
-  --method org.gnome.Shell.Extensions.Windows.GetFrameRect 3655718775
+  --method org.gnome.Shell.Extensions.Windows.ListOnWorkspace 0
 ```
 
-### Move Window to Workspace
+Use this when you want server-side filtering instead of fetching every window and filtering client-side.
 
-```sh
-gdbus call --session \
-  --dest org.gnome.Shell \
-  --object-path /org/gnome/Shell/Extensions/Windows \
-  --method org.gnome.Shell.Extensions.Windows.MoveToWorkspace 3655718775 1
+## OpenALO Grounding Pattern
+
+Use the focused window frame together with the monitor scale factor:
+
+```python
+focused = ext.GetFocusedWindow()
+monitor = ext.GetMonitorGeometry(focused["monitor"])
+scale = monitor["scale_factor"]
+screen_x = (atspi_x + focused["x"]) * scale
+screen_y = (atspi_y + focused["y"]) * scale
 ```
 
-### Move and Resize
+## Documentation
 
-```sh
-gdbus call --session \
-  --dest org.gnome.Shell \
-  --object-path /org/gnome/Shell/Extensions/Windows \
-  --method org.gnome.Shell.Extensions.Windows.MoveResize 3655718775 1500 100 1200 800
-```
-
-### Window Actions
-
-Methods taking only `winid`:
-
-- `Maximize`
-- `Minimize`
-- `Unmaximize`
-- `Unminimize`
-- `Activate`
-- `Close`
-
-## Notes on `jq`
-
-Some `gdbus` builds do not support `--print-reply=literal`. If your local version prints a usage message when you pass that flag, use plain `gdbus call` and parse the returned tuple manually.
-
-## Docs
-
-Additional project docs:
-
-- [DBus API Reference](docs/API.md)
-- [Execution Plan](docs/WindowCalls_OpenALO_Execution_Plan.md)
-- [Expert Report](docs/report.md)
+- [DBus API Reference](/home/jony/alo-agent/window-actions/docs/API.md)
+- [Security Policy](/home/jony/alo-agent/window-actions/SECURITY.md)
+- [Changelog](/home/jony/alo-agent/window-actions/CHANGELOG.md)
